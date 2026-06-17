@@ -1,6 +1,5 @@
 package com.phisher98.cloudplay
 
-
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -44,10 +43,30 @@ class CloudPlay : MainAPI() {
         "X-Package" to base64Decode("Y29tLmNsb3VkcGxheS5hcHA=")
     )
 
+    private val validGroups = listOf(
+        "india", "hindi", "bengali", "tamil", "telugu", "malayalam", 
+        "kannada", "marathi", "punjabi", "bhojpuri", "gujarati"
+    )
+
+    private val strictNetworks = listOf(
+        "star plus", "star gold", "star bharat", "star utsav",
+        "zee tv", "zee cinema", "zee news", "zee anmol",
+        "sony", "set india", "colors", "ndtv", "aaj tak", 
+        "abp news", "republic", "india tv", "dangal", "b4u", 
+        "shemaroo", "ptc", "asianet", "sun tv", "cartoon network india", "pogo"
+    )
+
+    private fun isTargetChannel(name: String?, group: String?): Boolean {
+        val n = (name ?: "").lowercase()
+        val g = (group ?: "").lowercase()
+        if (validGroups.any { g.contains(it) }) return true
+        if (strictNetworks.any { n.contains(it) }) return true
+        return false
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val req = app.get("$mainUrl/app.php", headers = apiHeaders)
-        val res = req.parsedSafe<CloudPlayResponse>()
-            ?: throw Error("Failed to parse app.php. Text: ${req.text}")
+        val res = req.parsedSafe<CloudPlayResponse>() ?: throw Error("Failed to parse app.php. Text: ${req.text}")
 
         val decryptedJson = decryptPayload(res.payload, res.iv)
         val streams = parseJson<CloudPlayStreams>(decryptedJson).streams
@@ -55,7 +74,7 @@ class CloudPlay : MainAPI() {
         val homePageLists = streams.amap { stream ->
             val shows = fetchChannels(stream.url, stream.logo)
             HomePageList(stream.name ?: "Unknown", shows, isHorizontalImages = true)
-        }
+        }.filter { it.list.isNotEmpty() }
 
         return newHomePageResponse(homePageLists)
     }
@@ -80,10 +99,9 @@ class CloudPlay : MainAPI() {
         }
 
         try {
-            // First try parsing as a list of channels
             val channels = parseJson<List<CloudPlayChannel>>(resText)
             if (channels.isNotEmpty() && (channels[0].m3u8_url != null || channels[0].mpd_url != null)) {
-                return channels.map { channel ->
+                return channels.filter { isTargetChannel(it.name, it.group) }.map { channel ->
                     val channelName = channel.name ?: "Unknown"
                     val posterUrl = channel.logo ?: fallbackLogo ?: ""
                     val data = channel.toJson()
@@ -137,39 +155,40 @@ class CloudPlay : MainAPI() {
                     currentReferer = opt.substringAfter("=")
                 }
             } else if (!l.startsWith("#") && l.isNotEmpty()) {
-                val urlParts = l.split("|")
-                val rawUrl = urlParts[0]
-                val params = if (urlParts.size > 1) urlParts[1] else ""
+                if (isTargetChannel(currentName, currentGroup)) {
+                    val urlParts = l.split("|")
+                    val rawUrl = urlParts[0]
+                    val params = if (urlParts.size > 1) urlParts[1] else ""
 
-                val urlUserAgent = Regex("User-Agent=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentUserAgent
-                val urlReferer = Regex("Referer=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentReferer
+                    val urlUserAgent = Regex("User-Agent=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentUserAgent
+                    val urlReferer = Regex("Referer=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentReferer
 
-                val urlKey = Regex("key=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentKey
-                val urlKeyId = Regex("keyid=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentKeyId
+                    val urlKey = Regex("key=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentKey
+                    val urlKeyId = Regex("keyid=([^&]+)", RegexOption.IGNORE_CASE).find(params)?.groupValues?.get(1) ?: currentKeyId
 
-                val type = if (rawUrl.contains(".mpd")) "dash" else "hls"
-                val licenseUrl = if (urlKey.isNotEmpty() && urlKeyId.isNotEmpty()) {
-                    "https://dummy.com/?keyid=$urlKeyId&key=$urlKey"
-                } else ""
+                    val type = if (rawUrl.contains(".mpd")) "dash" else "hls"
+                    val licenseUrl = if (urlKey.isNotEmpty() && urlKeyId.isNotEmpty()) {
+                        "https://dummy.com/?keyid=$urlKeyId&key=$urlKey"
+                    } else ""
 
-                val headersMap = mutableMapOf<String, String>()
-                if (urlUserAgent.isNotEmpty()) headersMap["User-Agent"] = urlUserAgent
-                if (urlReferer.isNotEmpty()) headersMap["Referer"] = urlReferer
+                    val headersMap = mutableMapOf<String, String>()
+                    if (urlUserAgent.isNotEmpty()) headersMap["User-Agent"] = urlUserAgent
+                    if (urlReferer.isNotEmpty()) headersMap["Referer"] = urlReferer
 
-                channels.add(CloudPlayChannel(
-                    type = type,
-                    id = null,
-                    name = currentName,
-                    group = currentGroup,
-                    logo = currentLogo,
-                    user_agent = urlUserAgent,
-                    m3u8_url = if (type == "hls") rawUrl else null,
-                    mpd_url = if (type == "dash") rawUrl else null,
-                    license_url = licenseUrl,
-                    headers = headersMap
-                ))
+                    channels.add(CloudPlayChannel(
+                        type = type,
+                        id = null,
+                        name = currentName,
+                        group = currentGroup,
+                        logo = currentLogo,
+                        user_agent = urlUserAgent,
+                        m3u8_url = if (type == "hls") rawUrl else null,
+                        mpd_url = if (type == "dash") rawUrl else null,
+                        license_url = licenseUrl,
+                        headers = headersMap
+                    ))
+                }
 
-                // reset
                 currentName = ""
                 currentLogo = ""
                 currentGroup = ""
